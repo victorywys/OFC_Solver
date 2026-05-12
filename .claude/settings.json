@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(git status*)",
+      "Bash(git log*)",
+      "Bash(git diff*)",
+      "Bash(git show*)",
+      "Bash(git branch*)",
+      "Bash(git checkout*)",
+      "Bash(git add*)",
+      "Bash(git commit*)",
+      "Bash(git push*)",
+      "Bash(git pull*)",
+      "Bash(git fetch*)",
+      "Bash(git merge*)",
+      "Bash(git notes*)",
+      "Bash(git rev-parse*)",
+      "Bash(git ls-files*)",
+      "Bash(claude-agents-*)",
+      "Write(.claude/*)",
+      "Edit(.claude/*)",
+      "Read"
+    ],
+    "deny": [
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(git push --force-with-lease*)",
+      "Bash(git reset --hard*)",
+      "Bash(git clean -fd*)",
+      "Bash(git clean -fdx*)",
+      "Bash(git checkout -- *)",
+      "Bash(git restore *)",
+      "Bash(rm -rf*)",
+      "Bash(rm -fr*)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [{
+      "matcher": "*",
+      "hooks": [{
+        "type": "command",
+        "command": "git log --oneline -10 --grep='AGENT_EVENT:' --all || echo 'Multi-agent coordination active - checking for recent agent activity'",
+        "statusMessage": "Checking agent coordination log"
+      }, {
+        "type": "command",
+        "command": "if git remote get-url origin >/dev/null 2>&1; then git fetch origin 'refs/notes/agent-coordination:refs/notes/agent-coordination-remote' 2>/dev/null && git notes --ref=agent-coordination merge -s cat_sort_uniq agent-coordination-remote 2>/dev/null; fi; true",
+        "statusMessage": "Syncing coordination notes from origin"
+      }, {
+        "type": "command",
+        "command": "git notes --ref=agent-coordination append -m \"$(date -Iseconds): SESSION_START | agent: ${CLAUDE_AGENT_ID:-claude-${USER:-agent}-${HOSTNAME:-local}${CLAUDE_SESSION_ID:+-$CLAUDE_SESSION_ID}} | cwd: $(pwd)\" HEAD 2>/dev/null || git commit --allow-empty -m \"AGENT_EVENT: session_start | agent: ${CLAUDE_AGENT_ID:-claude-${USER:-agent}-${HOSTNAME:-local}${CLAUDE_SESSION_ID:+-$CLAUDE_SESSION_ID}} | timestamp: $(date -Iseconds)\" 2>/dev/null || echo 'Agent session started'",
+        "statusMessage": "Logging session start"
+      }]
+    }],
+    "Stop": [{
+      "matcher": "*",
+      "hooks": [{
+        "type": "command",
+        "command": "git notes --ref=agent-coordination append -m \"$(date -Iseconds): SESSION_STOP | agent: ${CLAUDE_AGENT_ID:-claude-${USER:-agent}-${HOSTNAME:-local}${CLAUDE_SESSION_ID:+-$CLAUDE_SESSION_ID}} | cwd: $(pwd)\" HEAD 2>/dev/null || git commit --allow-empty -m \"AGENT_EVENT: session_stop | agent: ${CLAUDE_AGENT_ID:-claude-${USER:-agent}-${HOSTNAME:-local}${CLAUDE_SESSION_ID:+-$CLAUDE_SESSION_ID}} | timestamp: $(date -Iseconds)\" 2>/dev/null || echo 'Agent session ended'",
+        "statusMessage": "Logging session end"
+      }, {
+        "type": "command",
+        "command": "if git remote get-url origin >/dev/null 2>&1; then git push origin refs/notes/agent-coordination 2>/dev/null; fi; true",
+        "statusMessage": "Pushing coordination notes to origin"
+      }]
+    }],
+    "PreToolUse": [{
+      "matcher": "Bash",
+      "hooks": [{
+        "type": "command",
+        "if": "Bash(git commit*)",
+        "command": "jq -r '.tool_input.command' | grep -q 'git commit' && git notes --ref=agent-coordination append -m \"$(date -Iseconds): PRE_COMMIT | agent: ${CLAUDE_AGENT_ID:-claude-${USER:-agent}-${HOSTNAME:-local}${CLAUDE_SESSION_ID:+-$CLAUDE_SESSION_ID}} | preparing commit\" HEAD 2>/dev/null || true",
+        "statusMessage": "Logging pre-commit activity"
+      }, {
+        "type": "command",
+        "if": "Bash(git checkout*)",
+        "command": "jq -r '.tool_input.command' | grep -q 'git checkout.*-b' && git notes --ref=agent-coordination append -m \"$(date -Iseconds): BRANCH_CREATE | agent: ${CLAUDE_AGENT_ID:-claude-${USER:-agent}-${HOSTNAME:-local}${CLAUDE_SESSION_ID:+-$CLAUDE_SESSION_ID}} | creating new branch\" HEAD 2>/dev/null || true",
+        "statusMessage": "Logging branch creation"
+      }]
+    }, {
+      "matcher": "Write|Edit",
+      "hooks": [{
+        "type": "command",
+        "command": "FILE_PATH=$(jq -r '.tool_input.file_path' 2>/dev/null); ROOT=$(git rev-parse --show-toplevel 2>/dev/null); if [[ -n \"$FILE_PATH\" && -n \"$ROOT\" && \"$FILE_PATH\" != *.git/* && \"$FILE_PATH\" != *.claude/* ]]; then LOCK_DIR=\"$ROOT/.claude/coordination/locks\"; mkdir -p \"$LOCK_DIR\" 2>/dev/null; HASH=$(printf %s \"$FILE_PATH\" | sha1sum | awk '{print $1}'); LOCK=\"$LOCK_DIR/$HASH.lock\"; ME=\"${CLAUDE_AGENT_ID:-claude-${USER:-agent}-${HOSTNAME:-local}${CLAUDE_SESSION_ID:+-$CLAUDE_SESSION_ID}}\"; NOW=$(date +%s); TTL=${CLAUDE_LOCK_TTL:-600}; if [[ -f \"$LOCK\" ]]; then OWNER=$(grep '^agent=' \"$LOCK\" | cut -d= -f2-); OWNER_TS=$(grep '^ts_epoch=' \"$LOCK\" | cut -d= -f2-); if [[ -n \"$OWNER\" && \"$OWNER\" != \"$ME\" && -n \"$OWNER_TS\" && $((NOW - OWNER_TS)) -lt $TTL ]]; then echo \"⚠️  advisory lock: $FILE_PATH is being edited by $OWNER (age: $((NOW - OWNER_TS))s)\" >&2; fi; fi; { echo \"agent=$ME\"; echo \"path=$FILE_PATH\"; echo \"ts=$(date -Iseconds)\"; echo \"ts_epoch=$NOW\"; } > \"$LOCK\"; fi; true",
+        "statusMessage": "Acquiring advisory file lock"
+      }, {
+        "type": "command",
+        "command": "FILE_PATH=$(jq -r '.tool_input.file_path' 2>/dev/null) && if [[ \"$FILE_PATH\" != *.git/* && \"$FILE_PATH\" != .claude/* ]]; then git notes --ref=agent-coordination append -m \"$(date -Iseconds): FILE_MODIFY_START | agent: ${CLAUDE_AGENT_ID:-claude-${USER:-agent}-${HOSTNAME:-local}${CLAUDE_SESSION_ID:+-$CLAUDE_SESSION_ID}} | file: $FILE_PATH\" HEAD 2>/dev/null || true; fi",
+        "statusMessage": "Logging file modification start"
+      }]
+    }],
+    "PostToolUse": [{
+      "matcher": "Bash",
+      "hooks": [{
+        "type": "command",
+        "if": "Bash(git commit*)",
+        "command": "if jq -r '.tool_input.command' | grep -q 'git commit'; then COMMIT_HASH=$(git rev-parse HEAD 2>/dev/null) && git notes --ref=agent-coordination append -m \"$(date -Iseconds): COMMIT_COMPLETE | agent: ${CLAUDE_AGENT_ID:-claude-${USER:-agent}-${HOSTNAME:-local}${CLAUDE_SESSION_ID:+-$CLAUDE_SESSION_ID}} | hash: $COMMIT_HASH | branch: $(git branch --show-current 2>/dev/null)\" HEAD 2>/dev/null || git commit --allow-empty -m \"AGENT_EVENT: commit_complete | agent: ${CLAUDE_AGENT_ID:-claude-${USER:-agent}-${HOSTNAME:-local}${CLAUDE_SESSION_ID:+-$CLAUDE_SESSION_ID}} | hash: $COMMIT_HASH | timestamp: $(date -Iseconds)\"; fi",
+        "statusMessage": "Logging commit completion"
+      }, {
+        "type": "command",
+        "if": "Bash(git push*)",
+        "command": "if jq -r '.tool_input.command' | grep -q 'git push'; then BRANCH=$(git branch --show-current 2>/dev/null) && git notes --ref=agent-coordination append -m \"$(date -Iseconds): PUSH_COMPLETE | agent: ${CLAUDE_AGENT_ID:-claude-${USER:-agent}-${HOSTNAME:-local}${CLAUDE_SESSION_ID:+-$CLAUDE_SESSION_ID}} | branch: $BRANCH\" HEAD 2>/dev/null || git commit --allow-empty -m \"AGENT_EVENT: push_complete | agent: ${CLAUDE_AGENT_ID:-claude-${USER:-agent}-${HOSTNAME:-local}${CLAUDE_SESSION_ID:+-$CLAUDE_SESSION_ID}} | branch: $BRANCH | timestamp: $(date -Iseconds)\"; fi",
+        "statusMessage": "Logging push completion"
+      }, {
+        "type": "command",
+        "if": "Bash(git merge*)",
+        "command": "if jq -r '.tool_input.command' | grep -q 'git merge'; then git notes --ref=agent-coordination append -m \"$(date -Iseconds): MERGE_COMPLETE | agent: ${CLAUDE_AGENT_ID:-claude-${USER:-agent}-${HOSTNAME:-local}${CLAUDE_SESSION_ID:+-$CLAUDE_SESSION_ID}} | merged into: $(git branch --show-current 2>/dev/null)\" HEAD 2>/dev/null || git commit --allow-empty -m \"AGENT_EVENT: merge_complete | agent: ${CLAUDE_AGENT_ID:-claude-${USER:-agent}-${HOSTNAME:-local}${CLAUDE_SESSION_ID:+-$CLAUDE_SESSION_ID}} | timestamp: $(date -Iseconds)\"; fi",
+        "statusMessage": "Logging merge completion"
+      }]
+    }, {
+      "matcher": "Write|Edit",
+      "hooks": [{
+        "type": "command",
+        "command": "FILE_PATH=$(jq -r '.tool_input.file_path' 2>/dev/null) && if [[ \"$FILE_PATH\" != *.git/* && \"$FILE_PATH\" != .claude/* ]]; then git notes --ref=agent-coordination append -m \"$(date -Iseconds): FILE_MODIFY_COMPLETE | agent: ${CLAUDE_AGENT_ID:-claude-${USER:-agent}-${HOSTNAME:-local}${CLAUDE_SESSION_ID:+-$CLAUDE_SESSION_ID}} | file: $FILE_PATH\" HEAD 2>/dev/null || true; fi",
+        "statusMessage": "Logging file modification completion"
+      }, {
+        "type": "command",
+        "command": "FILE_PATH=$(jq -r '.tool_input.file_path' 2>/dev/null); ROOT=$(git rev-parse --show-toplevel 2>/dev/null); if [[ -n \"$FILE_PATH\" && -n \"$ROOT\" && \"$FILE_PATH\" != *.git/* && \"$FILE_PATH\" != *.claude/* ]]; then LOCK_DIR=\"$ROOT/.claude/coordination/locks\"; HASH=$(printf %s \"$FILE_PATH\" | sha1sum | awk '{print $1}'); LOCK=\"$LOCK_DIR/$HASH.lock\"; ME=\"${CLAUDE_AGENT_ID:-claude-${USER:-agent}-${HOSTNAME:-local}${CLAUDE_SESSION_ID:+-$CLAUDE_SESSION_ID}}\"; if [[ -f \"$LOCK\" ]]; then OWNER=$(grep '^agent=' \"$LOCK\" | cut -d= -f2-); if [[ \"$OWNER\" == \"$ME\" ]]; then rm -f \"$LOCK\"; fi; fi; fi; true",
+        "statusMessage": "Releasing advisory file lock"
+      }]
+    }],
+    "TaskCreated": [{
+      "matcher": "*",
+      "hooks": [{
+        "type": "command",
+        "command": "git notes --ref=agent-coordination append -m \"$(date -Iseconds): TASK_CREATED | agent: ${CLAUDE_AGENT_ID:-claude-${USER:-agent}-${HOSTNAME:-local}${CLAUDE_SESSION_ID:+-$CLAUDE_SESSION_ID}} | task: $(echo '$ARGUMENTS' | jq -r '.subject // \"unknown\"' 2>/dev/null || echo 'unknown')\" HEAD 2>/dev/null || git commit --allow-empty -m \"AGENT_EVENT: task_created | agent: ${CLAUDE_AGENT_ID:-claude-${USER:-agent}-${HOSTNAME:-local}${CLAUDE_SESSION_ID:+-$CLAUDE_SESSION_ID}} | timestamp: $(date -Iseconds)\" 2>/dev/null || echo 'Task created'",
+        "statusMessage": "Logging task creation"
+      }]
+    }],
+    "TaskCompleted": [{
+      "matcher": "*",
+      "hooks": [{
+        "type": "command",
+        "command": "git notes --ref=agent-coordination append -m \"$(date -Iseconds): TASK_COMPLETED | agent: ${CLAUDE_AGENT_ID:-claude-${USER:-agent}-${HOSTNAME:-local}${CLAUDE_SESSION_ID:+-$CLAUDE_SESSION_ID}} | task: $(echo '$ARGUMENTS' | jq -r '.subject // \"unknown\"' 2>/dev/null || echo 'unknown')\" HEAD 2>/dev/null || git commit --allow-empty -m \"AGENT_EVENT: task_completed | agent: ${CLAUDE_AGENT_ID:-claude-${USER:-agent}-${HOSTNAME:-local}${CLAUDE_SESSION_ID:+-$CLAUDE_SESSION_ID}} | timestamp: $(date -Iseconds)\" 2>/dev/null || echo 'Task completed'",
+        "statusMessage": "Logging task completion"
+      }]
+    }]
+  }
+}

@@ -80,3 +80,7 @@ Desktop.ini
 .env
 .env.local
 *.local
+
+# agent-collab
+.claude/coordination/locks/
+!.claude/coordination/messages.log
