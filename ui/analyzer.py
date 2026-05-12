@@ -321,6 +321,16 @@ class Analyzer:
         self.policy.n_prior_hits = 0
         self.policy.n_fallback_calls = 0
 
+        # Plumb the per-call horizon-value table into the policy so that
+        # the street-1 normal-tier opening-book lookup can re-rank stored
+        # candidates by horizon-adjusted EV. Thread-local, so concurrent
+        # analyze() calls with different `future_hands` don't mix.
+        try:
+            self.policy.set_horizon_values(tier_horizon_values)
+        except AttributeError:
+            # Older or non-TableAware policies — no-op.
+            pass
+
         # Per-call RNG. We draw a single seed from the shared self._rng
         # (GIL-safe even under concurrent calls) and then use a local
         # Random instance for all subsequent draws in this analyze() call.
@@ -423,23 +433,23 @@ class Analyzer:
             )
 
         # 4. Override recommendation: pick the candidate with the highest
-        # rollout EV mean, ignoring the table-aware policy's choice and
-        # any horizon / prior / foul factors. The policy's pick is still
-        # used to seed the candidate set (so it always gets scored), but
-        # it no longer wins the `is_recommended` flag unless its rollout
-        # EV is actually the best.
+        # combined EV (this-hand rollout EV plus horizon bonus). This
+        # respects the user's `future_hands` request: at H=0 the bonus
+        # is zero and we reduce to argmax(ev_mean); at H>0 we account
+        # for the per-candidate fantasy-entry distribution.
         #
         # When no rollouts were requested (n_rollouts == 0) every
-        # candidate has ev_mean == 0; in that degenerate case fall back
-        # to the policy's pick to avoid an arbitrary recommendation.
+        # candidate has ev_mean == 0 and horizon_ev == 0; in that
+        # degenerate case fall back to the policy's pick to avoid an
+        # arbitrary recommendation.
         any_rollouts = any(c.n_rollouts > 0 for c in cand_stats)
         if any_rollouts:
-            best = max(cand_stats, key=lambda c: c.ev_mean)
+            best = max(cand_stats, key=lambda c: c.combined_ev)
             for c in cand_stats:
                 c.is_recommended = (c is best)
 
-        # 5. Sort by rollout EV (desc), with recommended as a tiebreaker.
-        cand_stats.sort(key=lambda c: (-c.ev_mean, not c.is_recommended))
+        # 5. Sort by combined EV (desc), with recommended as a tiebreaker.
+        cand_stats.sort(key=lambda c: (-c.combined_ev, not c.is_recommended))
 
         elapsed = time.perf_counter() - t0
         return AnalysisResult(

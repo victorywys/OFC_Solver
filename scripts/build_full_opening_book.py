@@ -72,18 +72,33 @@ ACTION_SIG = tuple[tuple[int, int], ...]
 # ---------------------------------------------------------------------------
 # Worker (module-level so it is picklable for spawn)
 # ---------------------------------------------------------------------------
-def _solve_one(args: tuple[HAND_KEY, int, int]) -> tuple[HAND_KEY, ACTION_SIG]:
+def _solve_one(
+    args: tuple[HAND_KEY, int, int, bool],
+) -> tuple[HAND_KEY, object]:
     """Solve a single canonical street-1 hand. Module-scope for pickling.
 
-    Returns ``(canonical_hand_key, canonical_action_signature)``.
+    Returns ``(canonical_hand_key, payload)`` where ``payload`` is either:
+
+    * legacy schema (``rich=False``):
+        ``ACTION_SIG`` — the canonical action signature of the best move.
+
+    * rich schema (``rich=True``):
+        ``tuple[CandidateRecord, ...]`` — per-candidate stats for the
+        top-K heuristic candidates, sorted by ``ev_mean`` descending.
+        Card ids inside the record placements are *canonical*.
     """
-    canon_hand, n_rollouts, top_k = args
+    canon_hand, n_rollouts, top_k, rich = args
 
     # Lazy imports keep the spawned interpreter's startup cost low and
     # avoid pulling import-time side effects into the parent.
     from ai.heuristic_policy import HeuristicPolicy
     from ai.monte_carlo_policy import MCConfig, MonteCarloPolicy
+    from ai.rollout import legal_actions, play_to_terminal, resample_deck
+    from ai.heuristic_policy import score_action
     from state.game_state import GameState
+    from tables.canonical_opening import CandidateRecord
+    from tables.welford import Welford
+    from engine.fantasy import FantasyTier
 
     # Deterministic seed per canonical hand.
     digest = hashlib.blake2b(
@@ -103,14 +118,92 @@ def _solve_one(args: tuple[HAND_KEY, int, int]) -> tuple[HAND_KEY, ACTION_SIG]:
     gs.hands[1].pending = others[:5]
     gs.deck._cards = others[5:]  # type: ignore[attr-defined]
 
-    pol = MonteCarloPolicy(
-        config=MCConfig(n_rollouts=n_rollouts, top_k=top_k),
-        completion_policy=HeuristicPolicy(seed=seed),
-        seed=seed,
-    )
-    action = pol.act(gs, 0)
-    # `canonical_action` here is just `tuple(sorted(placements))`.
-    return canon_hand, tuple(sorted(action.placements))
+    if not rich:
+        pol = MonteCarloPolicy(
+            config=MCConfig(n_rollouts=n_rollouts, top_k=top_k),
+            completion_policy=HeuristicPolicy(seed=seed),
+            seed=seed,
+        )
+        action = pol.act(gs, 0)
+        return canon_hand, tuple(sorted(action.placements))
+
+    # ---------- rich schema: per-candidate CRN rollouts ----------
+    hs = gs.hands[0]
+    # Heuristic prefilter to top-K candidates.
+    cands = legal_actions(gs, 0)
+    if not cands:
+        raise RuntimeError("no legal actions on street-1 (impossible)")
+    scored = []
+    for i, a in enumerate(cands):
+        s = score_action(a, hs.board).total
+        scored.append((s, i, a))
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    kept = [a for _, _, a in scored[:top_k]]
+
+    # CRN seeds: one stream per rollout slot, shared across candidates.
+    crn_rng = random.Random(seed ^ 0xC0FFEE)
+    seeds = [crn_rng.getrandbits(32) for _ in range(n_rollouts)]
+    completion = HeuristicPolicy(seed=seed)
+    opp = completion  # opponent uses same heuristic policy
+
+    records: list[CandidateRecord] = []
+    for a in kept:
+        ev = Welford()
+        n_foul = 0
+        n_fant = 0
+        dest_counts: dict[int, int] = {}
+        for s in seeds:
+            gs2 = gs.clone()
+            r = random.Random(s)
+            resample_deck(gs2, r)
+            try:
+                gs2.step(0, a)
+            except Exception:
+                continue
+            if gs2.needs_action(1):
+                try:
+                    gs2.step(1, opp.act(gs2, 1))
+                except Exception:
+                    continue
+            # CRN-seed the completion policy
+            crng = getattr(completion, "_rng", None)
+            if crng is not None and hasattr(crng, "seed"):
+                crng.seed(s ^ 0x9E3779B9)
+            try:
+                play_to_terminal(gs2, completion, completion)
+            except Exception:
+                continue
+            sb = gs2.score()
+            ev.push(float(sb.total_a))
+            fouls = gs2.fouls()
+            if fouls[0]:
+                n_foul += 1
+                # On a foul, next_fantasy_tiers() returns NORMAL by spec.
+            try:
+                tiers = gs2.next_fantasy_tiers()
+            except Exception:
+                tiers = (FantasyTier.NORMAL, FantasyTier.NORMAL)
+            dest = int(tiers[0])
+            dest_counts[dest] = dest_counts.get(dest, 0) + 1
+            if tiers[0] != FantasyTier.NORMAL:
+                n_fant += 1
+        n_done = ev.n
+        records.append(
+            CandidateRecord(
+                placements=tuple(sorted(a.placements)),
+                ev_mean=ev.mean,
+                ev_se=ev.stderr,
+                n_rollouts=n_done,
+                foul_rate=(n_foul / n_done) if n_done else 0.0,
+                fantasy_entry_rate=(n_fant / n_done) if n_done else 0.0,
+                dest_tier_counts=tuple(sorted(dest_counts.items())),
+            )
+        )
+    # Sort by ev_mean descending so entry[0] is always the per-hand argmax.
+    records.sort(key=lambda r: -r.ev_mean)
+    return canon_hand, tuple(records)
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +228,7 @@ def build(
     limit: Optional[int],
     resume: bool,
     checkpoint_every: int,
+    rich: bool = True,
 ) -> None:
     from tables.canonical_opening import (
         CanonicalOpeningBookTable,
@@ -155,7 +249,7 @@ def build(
               flush=True)
 
     # Resume support.
-    book: dict[HAND_KEY, ACTION_SIG] = {}
+    book: dict[HAND_KEY, object] = {}
     if resume and out_path.is_file():
         with out_path.open("rb") as f:
             loaded = pickle.load(f)
@@ -170,8 +264,10 @@ def build(
         print(f"  resume: loaded {len(book):,} previously-solved hands",
               flush=True)
     pending = [h for h in all_hands if h not in book]
+    schema = "rich (per-candidate stats)" if rich else "legacy (single action)"
     print(f"  to solve: {len(pending):,} "
-          f"(workers={n_workers}, n_rollouts={n_rollouts}, top_k={top_k})",
+          f"(workers={n_workers}, n_rollouts={n_rollouts}, "
+          f"top_k={top_k}, schema={schema})",
           flush=True)
     if not pending:
         print("Nothing to do. Saving and exiting.")
@@ -192,7 +288,7 @@ def build(
 
     signal.signal(signal.SIGINT, _handler)
 
-    tasks = [(h, n_rollouts, top_k) for h in pending]
+    tasks = [(h, n_rollouts, top_k, rich) for h in pending]
     total = len(book) + len(tasks)
     t_start = time.perf_counter()
     last_ckpt = len(book)
@@ -200,10 +296,10 @@ def build(
     ctx = multiprocessing.get_context("spawn")
     with ctx.Pool(processes=n_workers) as pool:
         try:
-            for canon_hand, action_sig in pool.imap_unordered(
+            for canon_hand, payload in pool.imap_unordered(
                 _solve_one, tasks, chunksize=4
             ):
-                book[canon_hand] = action_sig
+                book[canon_hand] = payload
                 done = len(book)
                 if done % 100 == 0 or done == total:
                     elapsed = time.perf_counter() - t_start
@@ -235,6 +331,7 @@ def build(
         "n_rollouts": n_rollouts,
         "top_k": top_k,
         "n_workers": n_workers,
+        "schema": "rich" if rich else "legacy",
         "elapsed_s": elapsed,
         "elapsed_h": elapsed / 3600,
         "out_path": str(out_path),
@@ -291,6 +388,14 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         "--checkpoint-every", type=int, default=500,
         help="Flush the pickle every N newly-solved hands (default: 500).",
     )
+    ap.add_argument(
+        "--legacy", action="store_true",
+        help=(
+            "Write the old single-action schema instead of the rich "
+            "per-candidate schema. Faster (only stores 1 action per orbit) "
+            "but disables horizon-aware re-ranking at lookup time."
+        ),
+    )
     args = ap.parse_args(list(argv) if argv is not None else None)
 
     build(
@@ -301,6 +406,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         limit=args.limit,
         resume=args.resume,
         checkpoint_every=args.checkpoint_every,
+        rich=not args.legacy,
     )
     return 0
 

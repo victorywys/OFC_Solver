@@ -180,16 +180,89 @@ def apply_inverse(
 # ---------------------------------------------------------------------------
 # Lookup table
 # ---------------------------------------------------------------------------
+# Per-candidate record (rich format)
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class CandidateRecord:
+    """Per-candidate stats stored in the rich canonical opening book.
+
+    Card ids inside ``placements`` are *canonical*. Use
+    :func:`apply_inverse` (or :meth:`CanonicalOpeningBookTable.candidates`)
+    to obtain a record whose card ids match the player's real hand.
+
+    Attributes
+    ----------
+    placements
+        Sorted tuple of ``(card_id, slot_id)`` pairs.
+    ev_mean
+        Mean per-hand chip swing across all CRN rollouts for this action.
+    ev_se
+        Standard error of ``ev_mean``.
+    n_rollouts
+        Number of completed (non-skipped) rollouts that contributed.
+    foul_rate
+        Fraction of completed rollouts whose terminal board fouled.
+    fantasy_entry_rate
+        Fraction of completed rollouts whose next-hand tier is not NORMAL.
+    dest_tier_counts
+        ``int(FantasyTier) -> count`` of next-hand tiers observed across
+        rollouts. The sum equals ``n_rollouts``. Used at lookup time to
+        re-rank by ``ev_mean + sum_t (count[t] / n) * horizon_bonus[t]``.
+    """
+
+    placements: tuple[tuple[int, int], ...]
+    ev_mean: float
+    ev_se: float
+    n_rollouts: int
+    foul_rate: float
+    fantasy_entry_rate: float
+    dest_tier_counts: tuple[tuple[int, int], ...]  # sorted ((tier_int, count), ...)
+
+    @property
+    def dest_tier_distribution(self) -> dict[int, float]:
+        """Normalised next-hand tier distribution: P(tier | this action)."""
+        if self.n_rollouts <= 0:
+            return {}
+        return {t: c / self.n_rollouts for t, c in self.dest_tier_counts}
+
+
+def _apply_inverse_record(rec: "CandidateRecord", ctx: CanonContext) -> "CandidateRecord":
+    """Return a copy of ``rec`` whose ``placements`` use real card ids."""
+    return CandidateRecord(
+        placements=apply_inverse(rec.placements, ctx),
+        ev_mean=rec.ev_mean,
+        ev_se=rec.ev_se,
+        n_rollouts=rec.n_rollouts,
+        foul_rate=rec.foul_rate,
+        fantasy_entry_rate=rec.fantasy_entry_rate,
+        dest_tier_counts=rec.dest_tier_counts,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Lookup table
+# ---------------------------------------------------------------------------
 class CanonicalOpeningBookTable:
     """A fully-precomputed opening book keyed by canonical hands.
 
-    The on-disk representation is a plain ``dict``:
+    Two on-disk schemas are supported. The class accepts both at load
+    time and exposes the same lookup API; the richer schema additionally
+    enables horizon-aware re-ranking via :meth:`lookup_horizon`.
+
+    **Legacy (v1) schema**::
 
         canonical_sorted_hand : tuple[int, ...]   ->   action_sig
 
     where ``action_sig`` is a sorted tuple of ``(card_id, slot)`` pairs
-    using the *canonical* card ids. Lookup canonicalizes the live hand,
-    fetches the canonical action, and re-suits it back.
+    using *canonical* card ids.
+
+    **Rich (v2) schema**::
+
+        canonical_sorted_hand : tuple[int, ...]   ->   tuple[CandidateRecord, ...]
+
+    a tuple of per-candidate records sorted by ``ev_mean`` descending.
+    The first entry is always the per-hand argmax; later entries become
+    contenders only after horizon-aware reweighting.
 
     The class is API-compatible with :class:`tables.opening_book.OpeningBookTable`
     so ``TableAwarePolicy.opening_book`` can be swapped in directly. The
@@ -197,24 +270,124 @@ class CanonicalOpeningBookTable:
     entry is authoritative by construction.
     """
 
+    SCHEMA_VERSION = 2
+
     def __init__(
         self,
-        entries: dict[tuple[int, ...], tuple[tuple[int, int], ...]],
+        entries: dict[
+            tuple[int, ...],
+            tuple[tuple[int, int], ...] | tuple[CandidateRecord, ...],
+        ],
     ) -> None:
         self.entries = entries
 
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _is_rich(self, value) -> bool:
+        # A v2 entry is a tuple/list whose first element is a CandidateRecord.
+        return (
+            isinstance(value, (tuple, list))
+            and len(value) > 0
+            and isinstance(value[0], CandidateRecord)
+        )
+
+    def _canon_best_action(
+        self, value
+    ) -> Optional[tuple[tuple[int, int], ...]]:
+        """Extract the canonical-coordinate best action from a v1 or v2 entry."""
+        if value is None:
+            return None
+        if self._is_rich(value):
+            return value[0].placements
+        # v1: value is already the sorted action sig
+        return value
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
     def lookup(
         self,
         hand: Sequence[int],
         min_visits: int = 0,  # accepted, ignored
     ) -> Optional[tuple[tuple[int, int], ...]]:
+        """Return the per-hand argmax action, re-suited to ``hand``.
+
+        Backward-compatible with v1 entries. For v2 entries this returns
+        the first candidate (highest ``ev_mean``) — i.e., the choice that
+        is optimal when ``future_hands == 0``.
+        """
         if len(hand) != 5:
             return None
         canon_key, ctx = canonicalize(hand)
-        canon_action = self.entries.get(canon_key)
+        value = self.entries.get(canon_key)
+        canon_action = self._canon_best_action(value)
         if canon_action is None:
             return None
         return apply_inverse(canon_action, ctx)
+
+    def candidates(self, hand: Sequence[int]) -> list[CandidateRecord]:
+        """Return the per-candidate records for ``hand`` (re-suited).
+
+        Empty list for legacy v1 entries (no diagnostics stored) or when
+        ``hand`` is not in the book.
+        """
+        if len(hand) != 5:
+            return []
+        canon_key, ctx = canonicalize(hand)
+        value = self.entries.get(canon_key)
+        if value is None or not self._is_rich(value):
+            return []
+        return [_apply_inverse_record(r, ctx) for r in value]
+
+    def lookup_horizon(
+        self,
+        hand: Sequence[int],
+        *,
+        tier_horizon_values: dict[int, float] | None = None,
+    ) -> Optional[tuple[tuple[int, int], ...]]:
+        """Horizon-aware lookup: argmax over stored candidates given H.
+
+        Each candidate is scored as ::
+
+            ev_mean + sum_t P(next_tier == t | a) * tier_horizon_values[t]
+
+        and the best is re-suited and returned. When the entry is legacy
+        (v1, no per-candidate stats) or ``tier_horizon_values`` is empty,
+        this behaves exactly like :meth:`lookup`.
+        """
+        if len(hand) != 5:
+            return None
+        canon_key, ctx = canonicalize(hand)
+        value = self.entries.get(canon_key)
+        if value is None:
+            return None
+        if not self._is_rich(value) or not tier_horizon_values:
+            return apply_inverse(self._canon_best_action(value), ctx)
+
+        best_rec: Optional[CandidateRecord] = None
+        best_score = float("-inf")
+        for r in value:
+            dist = r.dest_tier_distribution
+            bonus = sum(
+                p * tier_horizon_values.get(tier, 0.0)
+                for tier, p in dist.items()
+            )
+            score = r.ev_mean + bonus
+            if score > best_score:
+                best_score = score
+                best_rec = r
+        assert best_rec is not None
+        return apply_inverse(best_rec.placements, ctx)
+
+    def is_rich(self) -> bool:
+        """True iff this book stores per-candidate diagnostics (v2 schema)."""
+        # Cheap: check first entry. All entries share the same schema by
+        # convention (the builder writes uniformly).
+        if not self.entries:
+            return False
+        first = next(iter(self.entries.values()))
+        return self._is_rich(first)
 
     def __len__(self) -> int:
         return len(self.entries)
@@ -224,7 +397,8 @@ class CanonicalOpeningBookTable:
         return canon_key in self.entries
 
     def __repr__(self) -> str:
-        return f"CanonicalOpeningBookTable(entries={len(self.entries):,})"
+        kind = "rich" if self.is_rich() else "legacy"
+        return f"CanonicalOpeningBookTable(entries={len(self.entries):,}, schema={kind})"
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +424,7 @@ def enumerate_canonical_hands() -> list[tuple[int, ...]]:
 
 __all__ = [
     "CanonContext",
+    "CandidateRecord",
     "canonicalize",
     "apply_inverse",
     "CanonicalOpeningBookTable",

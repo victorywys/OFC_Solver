@@ -359,6 +359,14 @@ class FastAnalyzer:
         self.policy.n_prior_hits = 0
         self.policy.n_fallback_calls = 0
 
+        # Per-thread per-call horizon-value table for the opening-book
+        # lookup. Lets the canonical book re-rank stored candidates by
+        # horizon-adjusted EV at the configured `future_hands`.
+        try:
+            self.policy.set_horizon_values(tier_horizon_values)
+        except AttributeError:
+            pass
+
         # Per-call RNG. One GIL-safe draw from the shared self._rng, then
         # a local Random for the rest of this call. Isolates rollout
         # seeds across concurrent analyze() calls.
@@ -439,7 +447,18 @@ class FastAnalyzer:
             and hs.fantasy_tier == FantasyTier.NORMAL
             and len(hs.pending) == 5
         ):
-            book_asig = book.lookup(tuple(sorted(hs.pending)))
+            # Horizon-aware lookup when the book is rich and we have a
+            # non-zero horizon; otherwise plain lookup. Either way, the
+            # book's stored result is authoritative for street 1.
+            if (
+                tier_horizon_values
+                and hasattr(book, "is_rich") and book.is_rich()
+            ):
+                book_asig = book.lookup_horizon(
+                    hs.pending, tier_horizon_values=tier_horizon_values
+                )
+            else:
+                book_asig = book.lookup(tuple(sorted(hs.pending)))
             if book_asig is not None:
                 book_action = Action(book_asig)
                 rec_sig = canonical_action(book_action.placements)
@@ -563,15 +582,17 @@ class FastAnalyzer:
             )
 
         # ---------------------------------------------------------------
-        # 4. Pick recommendation by highest rollout EV (rollout-only).
+        # 4. Pick recommendation by highest combined EV (rollout EV plus
+        # horizon bonus). With H=0 the bonus is zero and we reduce to
+        # argmax(ev_mean); with H>0 we respect the user's horizon.
         # ---------------------------------------------------------------
         any_rollouts = any(c.n_rollouts > 0 for c in cand_stats)
         if any_rollouts:
-            best = max(cand_stats, key=lambda c: c.ev_mean)
+            best = max(cand_stats, key=lambda c: c.combined_ev)
             for c in cand_stats:
                 c.is_recommended = (c is best)
 
-        cand_stats.sort(key=lambda c: (-c.ev_mean, not c.is_recommended))
+        cand_stats.sort(key=lambda c: (-c.combined_ev, not c.is_recommended))
 
         elapsed = time.perf_counter() - t0
         return AnalysisResult(

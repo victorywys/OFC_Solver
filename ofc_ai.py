@@ -304,7 +304,30 @@ class OFCAI:
             gs = build_game_state(spec)
             player = int(spec.get("to_act", 0))
             with self._lock:
-                action = self.policy.act(gs, player)
+                # Plumb horizon values so the canonical book's
+                # lookup_horizon path can re-rank stored candidates
+                # before policy.act() returns.
+                tier_values: dict = {}
+                fev = getattr(self.analyzer, "fantasy_ev_table", None)
+                if (
+                    self.config.future_hands != 0
+                    and fev is not None
+                ):
+                    tier_values = fev.horizon_value_relative(
+                        self.config.future_hands
+                    )
+                try:
+                    self.policy.set_horizon_values(tier_values)
+                except AttributeError:
+                    pass
+                try:
+                    action = self.policy.act(gs, player)
+                finally:
+                    # Reset to avoid leaking horizon between calls.
+                    try:
+                        self.policy.set_horizon_values(None)
+                    except AttributeError:
+                        pass
             from engine.cards import card_str
             from state.board import SLOT_NAMES
             return {

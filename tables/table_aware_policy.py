@@ -47,9 +47,15 @@ class _PolicyCounters(threading.local):
         self.fantasy = 0
         self.prior = 0
         self.fallback = 0
+        # Per-thread per-call horizon-value override for the opening
+        # book. None disables horizon-aware lookup (default behaviour).
+        # Set via TableAwarePolicy.set_horizon_values() at the start of
+        # each request; reset to None to revert.
+        self.tier_horizon_values = None  # type: ignore[assignment]
 
 from .fantasy_cache import FantasyArrangementCache
 from .opening_book import OpeningBookTable
+from .canonical_opening import CanonicalOpeningBookTable
 from .policy_prior import PolicyPriorTable
 from .signatures import (
     canonical_action,
@@ -142,6 +148,22 @@ class TableAwarePolicy(Policy):
     def n_fallback_calls(self, v: int) -> None:
         self._counters.fallback = v
 
+    # ----- horizon-aware opening book override (per-thread) -----
+    def set_horizon_values(self, values: Optional[dict[int, float]]) -> None:
+        """Set the per-tier horizon-bonus table used by the next call.
+
+        When non-empty and the loaded opening book is a rich
+        :class:`CanonicalOpeningBookTable`, the next street-1
+        normal-tier decision re-ranks the book's stored candidates as ::
+
+            ev_mean + sum_t P(next_tier == t | a) * values[t]
+
+        and returns the new argmax. Pass ``None`` (or an empty dict) to
+        disable. The value is thread-local — concurrent requests do not
+        mix horizons.
+        """
+        self._counters.tier_horizon_values = values
+
     def act(self, gs: GameState, player: int) -> Action:
         cfg = self.config
         hs = gs.hands[player]
@@ -162,10 +184,27 @@ class TableAwarePolicy(Policy):
             and hs.fantasy_tier == FantasyTier.NORMAL
             and len(hs.pending) == 5
         ):
-            hand_key = street1_hand_signature(hs.pending)
-            best_asig = self.opening_book.lookup(
-                hand_key, min_visits=cfg.opening_min_visits
-            )
+            # Horizon-aware fast path: when a rich canonical book is
+            # loaded and a per-thread horizon-bonus table has been
+            # supplied via set_horizon_values(...), re-rank the stored
+            # candidates by ``ev_mean + sum_t P(t|a) * bonus[t]``. This
+            # serves the street-1 decision directly from the book — no
+            # rollouts — and the result depends on the requested horizon.
+            best_asig: Optional[tuple[tuple[int, int], ...]] = None
+            horizon_values = getattr(self._counters, "tier_horizon_values", None)
+            if (
+                horizon_values
+                and isinstance(self.opening_book, CanonicalOpeningBookTable)
+                and self.opening_book.is_rich()
+            ):
+                best_asig = self.opening_book.lookup_horizon(
+                    hs.pending, tier_horizon_values=horizon_values
+                )
+            if best_asig is None:
+                hand_key = street1_hand_signature(hs.pending)
+                best_asig = self.opening_book.lookup(
+                    hand_key, min_visits=cfg.opening_min_visits
+                )
             if best_asig is not None:
                 action = Action(best_asig)
                 if self._is_legal(action, gs, player):

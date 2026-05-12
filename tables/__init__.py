@@ -30,6 +30,7 @@ from .fantasy_ev import (
 from .foul_prob import FoulProbCollector, FoulProbTable
 from .opening_book import OpeningBookCollector, OpeningBookTable
 from .canonical_opening import (
+    CandidateRecord,
     CanonicalOpeningBookTable,
     canonicalize,
     apply_inverse,
@@ -57,6 +58,7 @@ __all__ = [
     "OpeningBookTable",
     "OpeningBookCollector",
     "CanonicalOpeningBookTable",
+    "CandidateRecord",
     "canonicalize",
     "apply_inverse",
     "enumerate_canonical_hands",
