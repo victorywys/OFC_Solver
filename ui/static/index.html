@@ -1,0 +1,984 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OFC AI — interactive analyzer</title>
+<style>
+  :root {
+    --bg: #131418;
+    --panel: #1c1e25;
+    --panel-2: #232631;
+    --line: #2c2f3a;
+    --text: #e8e8e8;
+    --muted: #8b8e97;
+    --accent: #6cc4ff;
+    --accent-2: #8a8aff;
+    --good: #5cd17b;
+    --warn: #f1b74d;
+    --bad: #f06a6a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px;
+    background: var(--bg); color: var(--text);
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 13px; line-height: 1.4;
+  }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  h2 { font-size: 13px; margin: 14px 0 6px; color: var(--muted);
+       letter-spacing: 0.05em; text-transform: uppercase; }
+  .topbar {
+    display: flex; gap: 16px; flex-wrap: wrap; align-items: center;
+    padding: 10px 12px; background: var(--panel); border-radius: 6px;
+    margin-bottom: 14px;
+  }
+  .topbar label { font-size: 12px; color: var(--muted); margin-right: 4px; }
+  .topbar input, .topbar select, .topbar button {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 4px;
+    padding: 4px 8px; font-size: 12px;
+  }
+  .topbar button {
+    background: var(--accent); color: #08111a; border: none;
+    padding: 6px 14px; cursor: pointer; font-weight: 600;
+  }
+  .topbar button.secondary {
+    background: var(--panel-2); color: var(--text);
+  }
+  .topbar button[disabled] { opacity: 0.5; cursor: wait; }
+  .layout {
+    display: grid;
+    grid-template-columns: 1fr 1.2fr 1fr;
+    gap: 14px;
+  }
+  @media (max-width: 1100px) {
+    .layout { grid-template-columns: 1fr; }
+  }
+  .panel {
+    background: var(--panel); border-radius: 6px; padding: 12px;
+  }
+
+  /* Board rows */
+  .row-line {
+    display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
+  }
+  .row-label {
+    width: 64px; flex-shrink: 0; font-size: 11px; color: var(--muted);
+    align-self: center; padding-left: 4px;
+  }
+  .row {
+    flex: 1; display: flex; flex-wrap: wrap; gap: 4px; min-height: 38px;
+    padding: 4px; background: var(--panel-2); border-radius: 4px;
+    border: 1px dashed var(--line);
+    cursor: pointer;
+  }
+  .row:hover { border-color: var(--accent); }
+  .row.full { cursor: default; opacity: 0.7; }
+  .row.full:hover { border-color: var(--line); }
+  .clear-btn {
+    background: var(--panel-2); color: var(--muted); border: 1px solid var(--line);
+    padding: 4px 8px; font-size: 11px; border-radius: 3px; cursor: pointer;
+  }
+  .clear-btn:hover { color: var(--bad); border-color: var(--bad); }
+
+  /* Cards */
+  .card {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 28px; height: 36px; border-radius: 3px;
+    background: #fafafa; color: #111; font-weight: 700; font-size: 12px;
+    cursor: pointer; user-select: none;
+    border: 1px solid #999;
+    position: relative;
+  }
+  .card.suit-c { color: #111; }
+  .card.suit-d { color: #d33; }
+  .card.suit-h { color: #d33; }
+  .card.suit-s { color: #111; }
+  .card.joker  { background: #2a2a2a; color: #ffd; border-color: #444; }
+  .card.dim { opacity: 0.22; cursor: pointer; }
+  .card.selected {
+    outline: 2px solid var(--accent);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0,0,0,0.4);
+  }
+  .card .order {
+    position: absolute; top: -6px; right: -6px;
+    background: var(--accent); color: #08111a; font-size: 9px;
+    border-radius: 8px; padding: 1px 4px; font-weight: 700;
+  }
+
+  /* Deck grid */
+  .deck-grid {
+    display: grid;
+    grid-template-columns: repeat(13, 1fr);
+    gap: 3px;
+  }
+  .joker-row {
+    display: flex; gap: 3px; margin-top: 6px;
+  }
+
+  /* Selection bar */
+  .selbar {
+    margin-top: 12px; padding: 10px;
+    background: var(--panel-2); border-radius: 5px;
+    border: 1px solid var(--line);
+  }
+  .selbar-head {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 8px;
+  }
+  .selbar-head .count { color: var(--muted); font-size: 11px; }
+  .place-btns {
+    display: flex; flex-wrap: wrap; gap: 6px;
+  }
+  .place-btns button {
+    background: var(--panel); border: 1px solid var(--line);
+    color: var(--text); padding: 5px 10px; border-radius: 3px;
+    cursor: pointer; font-size: 12px; font-weight: 600;
+  }
+  .place-btns button:hover:not(:disabled) {
+    border-color: var(--accent); color: var(--accent);
+  }
+  .place-btns button:disabled { opacity: 0.35; cursor: not-allowed; }
+  .place-btns .hand-btn {
+    background: var(--accent-2); color: #08111a; border-color: var(--accent-2);
+  }
+
+  /* Results */
+  .results { font-size: 12px; }
+  .results .meta { color: var(--muted); margin-bottom: 8px; }
+  .candidate {
+    border: 1px solid var(--line); border-radius: 5px;
+    padding: 8px; margin-bottom: 8px; background: var(--panel-2);
+  }
+  .candidate.recommended {
+    border-color: var(--good); background: #18271d;
+  }
+  .candidate .head {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 6px; flex-wrap: wrap; gap: 4px;
+  }
+  .candidate .ev { font-weight: 600; font-size: 14px; }
+  .candidate .ev.pos { color: var(--good); }
+  .candidate .ev.neg { color: var(--bad); }
+  .candidate .ev.zero { color: var(--muted); }
+  .candidate .placements {
+    font-family: ui-monospace, monospace; font-size: 11px;
+    display: flex; gap: 4px; align-items: center; flex-wrap: wrap;
+  }
+  .stats {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px;
+    margin-top: 6px; font-size: 11px; color: var(--muted);
+  }
+  .stats b { color: var(--text); font-weight: 600; }
+  .badge {
+    display: inline-block; font-size: 10px; padding: 1px 6px;
+    border-radius: 3px; background: var(--good); color: #0a1a10;
+    margin-left: 6px; font-weight: 700;
+  }
+  .err {
+    background: #2a1416; color: #ffbcbc; padding: 8px; border-radius: 4px;
+    border: 1px solid #5b2326; margin-bottom: 10px;
+  }
+  .info-box {
+    background: #1a2230; color: var(--muted); padding: 6px 10px;
+    border-radius: 4px; border: 1px solid #2a3850;
+    font-size: 11px; margin-bottom: 8px;
+  }
+  .small { font-size: 11px; color: var(--muted); }
+  .info-line {
+    display: flex; gap: 12px; flex-wrap: wrap; padding: 6px 0;
+    color: var(--muted); font-size: 11px;
+  }
+  .info-line b { color: var(--text); font-weight: 600; }
+  .toggle-section {
+    margin-top: 10px; padding-top: 10px;
+    border-top: 1px solid var(--line);
+  }
+  .toggle-section summary {
+    cursor: pointer; color: var(--muted); font-size: 12px;
+    padding: 4px 0;
+  }
+  .toggle-section summary:hover { color: var(--text); }
+</style>
+</head>
+<body>
+
+<h1>OFC AI — interactive analyzer <span id="status" class="small"></span></h1>
+
+<div class="topbar">
+  <div>
+    <label>Players</label>
+    <select id="n_players" title="Number of seats at the table (2 or 3). Loaded tables were trained with 2 players — absolute EV magnitudes for 3-player will be approximate.">
+      <option value="2" selected>2</option>
+      <option value="3">3</option>
+    </select>
+  </div>
+  <div id="street_wrap">
+    <label>Street</label>
+    <select id="street">
+      <option value="1" selected>1 (deal 5)</option>
+      <option value="2">2</option>
+      <option value="3">3</option>
+      <option value="4">4</option>
+      <option value="5">5</option>
+    </select>
+  </div>
+  <div>
+    <label>Fantasy</label>
+    <select id="fantasy_tier">
+      <option value="0" selected>NORMAL</option>
+      <option value="14">F14</option>
+      <option value="15">F15</option>
+      <option value="16">F16</option>
+      <option value="17">F17</option>
+    </select>
+  </div>
+  <div>
+    <label>Future hands</label>
+    <input id="future_hands" type="number" min="-1" step="1" value="5"
+           style="width: 70px"
+           title="How many future hands to value when entering/maintaining fantasy. 0 = this hand only, -1 = infinite horizon (converged EV).">
+  </div>
+  <div>
+    <label>Rollouts</label>
+    <input id="n_rollouts" type="number" min="0" max="5000" value="240" style="width: 70px">
+  </div>
+  <div>
+    <label>Top-K</label>
+    <input id="top_k" type="number" min="1" max="20" value="5" style="width: 50px">
+  </div>
+  <button id="analyze_btn">Analyze</button>
+  <button id="reset_btn" class="secondary">Reset</button>
+  <span class="small">Click cards on the right → click a row on the left.</span>
+</div>
+
+<div class="layout">
+
+  <!-- LEFT: YOUR BOARD -->
+  <div class="panel">
+    <h2>Your board</h2>
+    <div class="info-box" id="board_hint">
+      Click cards in the deck (right) to select them in order, then click a
+      row here to drop them. Click a placed card to remove it.
+    </div>
+    <div id="board_rows"></div>
+
+    <details class="toggle-section">
+      <summary>Advanced: opponents' revealed cards (optional)</summary>
+      <div class="small" style="margin-top: 6px">
+        Mark cards you've seen on each opponent's board. They'll be removed
+        from the deck for rollouts. By default, each empty opponent's full
+        history is synthesized by heuristic self-play.
+      </div>
+      <div id="dead_rows" style="margin-top: 8px"></div>
+    </details>
+  </div>
+
+  <!-- CENTER: DECK -->
+  <div class="panel">
+    <h2>Deck — multi-select</h2>
+    <div class="deck-grid" id="deck_grid"></div>
+    <div class="joker-row" id="joker_row"></div>
+    <div class="info-line">
+      <span>Available: <b id="avail_count">54</b></span>
+      <span>Used: <b id="used_count">0</b>/54</span>
+    </div>
+
+    <div class="selbar">
+      <div class="selbar-head">
+        <span><b>Selected:</b> <span id="selected_str">none</span></span>
+        <span class="count" id="selected_count">0 cards</span>
+      </div>
+      <div class="place-btns" id="place_btns">
+        <button class="hand-btn" data-target="pending">→ Hand</button>
+        <button data-target="top">→ Top</button>
+        <button data-target="middle">→ Middle</button>
+        <button data-target="bottom">→ Bottom</button>
+        <button data-target="discards">→ Discard</button>
+        <!-- opponent buttons inserted dynamically -->
+        <button class="secondary" id="clear_sel_btn"
+                style="background: var(--panel); color: var(--muted); border: 1px solid var(--line);">
+          Clear selection
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT: RESULTS -->
+  <div class="panel">
+    <h2>AI recommendation</h2>
+    <div id="results" class="results">
+      <div class="small">Configure a position and press Analyze.</div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// API base — injected by the UI server (see ui/server.py). Falls back to
+// same-origin so the page also works behind a single reverse proxy.
+// ---------------------------------------------------------------------------
+const API_BASE = (typeof window !== "undefined" && window.OFC_API_BASE)
+  ? window.OFC_API_BASE
+  : "";
+
+// ---------------------------------------------------------------------------
+// Card helpers
+// ---------------------------------------------------------------------------
+const RANKS = "23456789TJQKA";
+const SUITS = "cdhs";
+const SUIT_GLYPH = { c: "♣", d: "♦", h: "♥", s: "♠" };
+
+function cardId(rank, suit) { return rank * 4 + suit; }
+function cardStr(id) {
+  if (id === 52) return "*1";
+  if (id === 53) return "*2";
+  return RANKS[Math.floor(id / 4)] + SUITS[id % 4];
+}
+function cardLabel(id) {
+  if (id === 52) return "★1";
+  if (id === 53) return "★2";
+  return RANKS[Math.floor(id / 4)] + SUIT_GLYPH[SUITS[id % 4]];
+}
+function cardSuit(id) { return id < 52 ? SUITS[id % 4] : null; }
+
+// ---------------------------------------------------------------------------
+// State
+//
+// `you` = the player asking for advice (always seat 0 in the request).
+// `opp` = optional revealed dead-card areas on the opponent's board.
+// `selected` = ordered list of card ids the user has clicked but not yet
+//   placed.
+// ---------------------------------------------------------------------------
+const state = {
+  street: 1,
+  fantasy_tier: 0,
+  future_hands: 5,
+  n_players: 2,
+  selected: [],   // ordered list of card ids
+  you: { top: [], middle: [], bottom: [], discards: [], pending: [] },
+  // Two opponent slots; only the first `n_players - 1` are surfaced in UI.
+  opps: [
+    { top: [], middle: [], bottom: [], discards: [] },
+    { top: [], middle: [], bottom: [], discards: [] },
+  ],
+};
+
+const ROW_CAP = { top: 3, middle: 5, bottom: 5 };
+const ROW_LABEL = {
+  top: "Top", middle: "Middle", bottom: "Bottom",
+  discards: "Discards", pending: "Hand",
+};
+
+// Number of opponent slots actually shown in the UI.
+function nOpps() { return state.n_players - 1; }
+
+// All targets the place-buttons may write to.
+function getCardList(target) {
+  if (target.startsWith("opp")) {
+    // "opp0_top" / "opp1_middle" etc.
+    const m = target.match(/^opp(\d+)_(.+)$/);
+    if (!m) return null;
+    const idx = parseInt(m[1], 10);
+    return state.opps[idx][m[2]];
+  }
+  return state.you[target];
+}
+function targetRowKey(target) {
+  if (target.startsWith("opp")) {
+    const m = target.match(/^opp\d+_(.+)$/);
+    return m ? m[1] : null;
+  }
+  return target;
+}
+function targetCap(target) {
+  const key = targetRowKey(target);
+  return ROW_CAP[key] || 99;
+}
+
+function usedCards() {
+  const used = new Set();
+  for (const k of ["top", "middle", "bottom", "discards", "pending"]) {
+    for (const c of state.you[k]) used.add(c);
+  }
+  for (let i = 0; i < nOpps(); i++) {
+    for (const k of ["top", "middle", "bottom", "discards"]) {
+      for (const c of state.opps[i][k]) used.add(c);
+    }
+  }
+  return used;
+}
+
+function findOwner(id) {
+  for (const k of ["top", "middle", "bottom", "discards", "pending"]) {
+    const idx = state.you[k].indexOf(id);
+    if (idx >= 0) return { side: "you", oppIdx: -1, key: k, idx };
+  }
+  for (let oi = 0; oi < nOpps(); oi++) {
+    for (const k of ["top", "middle", "bottom", "discards"]) {
+      const idx = state.opps[oi][k].indexOf(id);
+      if (idx >= 0) return { side: "opp", oppIdx: oi, key: k, idx };
+    }
+  }
+  return null;
+}
+
+function removeCard(id) {
+  const o = findOwner(id);
+  if (!o) return false;
+  if (o.side === "you") state.you[o.key].splice(o.idx, 1);
+  else state.opps[o.oppIdx][o.key].splice(o.idx, 1);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Rendering — deck
+// ---------------------------------------------------------------------------
+function renderDeck() {
+  const grid = document.getElementById("deck_grid");
+  const jokers = document.getElementById("joker_row");
+  grid.innerHTML = "";
+  jokers.innerHTML = "";
+  const used = usedCards();
+  for (let s = 0; s < 4; s++) {
+    for (let r = 0; r < 13; r++) {
+      const id = cardId(r, s);
+      grid.appendChild(makeDeckCard(id, used.has(id)));
+    }
+  }
+  for (const id of [52, 53]) {
+    jokers.appendChild(makeDeckCard(id, used.has(id)));
+  }
+  document.getElementById("used_count").textContent = String(used.size);
+  document.getElementById("avail_count").textContent = String(54 - used.size);
+}
+
+function makeDeckCard(id, used) {
+  const el = document.createElement("div");
+  el.className = "card";
+  if (id < 52) el.classList.add("suit-" + cardSuit(id));
+  else el.classList.add("joker");
+  if (used) el.classList.add("dim");
+  const selIdx = state.selected.indexOf(id);
+  if (selIdx >= 0) el.classList.add("selected");
+  el.textContent = cardLabel(id);
+  el.dataset.cardId = id;
+  if (selIdx >= 0) {
+    const o = document.createElement("span");
+    o.className = "order";
+    o.textContent = String(selIdx + 1);
+    el.appendChild(o);
+  }
+  if (used) {
+    // click a placed card to remove it from wherever it lives
+    el.title = "Used — click to free";
+    el.addEventListener("click", () => {
+      removeCard(id);
+      renderAll();
+    });
+  } else {
+    el.addEventListener("click", () => {
+      const idx = state.selected.indexOf(id);
+      if (idx >= 0) state.selected.splice(idx, 1);
+      else state.selected.push(id);
+      renderAll();
+    });
+  }
+  return el;
+}
+
+// ---------------------------------------------------------------------------
+// Rendering — your board
+// ---------------------------------------------------------------------------
+function renderBoard() {
+  const root = document.getElementById("board_rows");
+  root.innerHTML = "";
+  for (const k of ["top", "middle", "bottom", "discards", "pending"]) {
+    root.appendChild(rowLineEl("you", -1, k, state.you[k], ROW_CAP[k]));
+  }
+
+  const dead = document.getElementById("dead_rows");
+  dead.innerHTML = "";
+  for (let oi = 0; oi < nOpps(); oi++) {
+    const head = document.createElement("div");
+    head.className = "small";
+    head.style.marginTop = "6px";
+    head.style.fontWeight = "600";
+    head.style.color = "var(--muted)";
+    head.textContent = `Opponent ${oi + 1}`;
+    dead.appendChild(head);
+    for (const k of ["top", "middle", "bottom", "discards"]) {
+      dead.appendChild(rowLineEl("opp", oi, k, state.opps[oi][k], ROW_CAP[k]));
+    }
+  }
+}
+
+function rowLineEl(side, oppIdx, key, cards, cap) {
+  const wrap = document.createElement("div");
+  wrap.className = "row-line";
+  const lbl = document.createElement("span");
+  lbl.className = "row-label";
+  const capStr = cap !== 99 ? `${cards.length}/${cap}` : `${cards.length}`;
+  lbl.textContent = `${ROW_LABEL[key]} (${capStr})`;
+  wrap.appendChild(lbl);
+
+  const row = document.createElement("div");
+  row.className = "row" + (cap !== 99 && cards.length >= cap ? " full" : "");
+  for (const id of cards) {
+    const c = document.createElement("span");
+    c.className = "card " + (id < 52 ? "suit-" + cardSuit(id) : "joker");
+    c.textContent = cardLabel(id);
+    c.title = "Click to remove";
+    c.addEventListener("click", e => {
+      e.stopPropagation();
+      const o = findOwner(id);
+      if (!o) return;
+      if (o.side === "you") state.you[o.key].splice(o.idx, 1);
+      else state.opps[o.oppIdx][o.key].splice(o.idx, 1);
+      renderAll();
+    });
+    row.appendChild(c);
+  }
+  // Click empty space (or non-card area) on the row to dump current selection.
+  row.addEventListener("click", () => {
+    const target = side === "opp" ? `opp${oppIdx}_${key}` : key;
+    placeSelected(target);
+  });
+  wrap.appendChild(row);
+
+  const btn = document.createElement("button");
+  btn.className = "clear-btn";
+  btn.textContent = "×";
+  btn.title = "Clear row";
+  btn.addEventListener("click", e => {
+    e.stopPropagation();
+    if (side === "you") state.you[key] = [];
+    else state.opps[oppIdx][key] = [];
+    renderAll();
+  });
+  wrap.appendChild(btn);
+  return wrap;
+}
+
+function renderPlaceButtons() {
+  const bar = document.getElementById("place_btns");
+  // Remove any existing dynamic opp buttons; keep static ones (you-side +
+  // clear selection at the end).
+  for (const b of [...bar.querySelectorAll("button[data-opp]")]) b.remove();
+  const clearBtn = document.getElementById("clear_sel_btn");
+  for (let oi = nOpps() - 1; oi >= 0; oi--) {
+    for (const [key, label] of [["discards", "disc"], ["bottom", "bot"],
+                                ["middle", "mid"], ["top", "top"]]) {
+      const b = document.createElement("button");
+      b.dataset.target = `opp${oi}_${key}`;
+      b.dataset.opp = String(oi);
+      b.textContent = `→ Opp${nOpps() === 1 ? "" : " " + (oi + 1)} ${label}`;
+      b.addEventListener("click", () => placeSelected(b.dataset.target));
+      bar.insertBefore(b, clearBtn);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Place selected cards
+// ---------------------------------------------------------------------------
+function placeSelected(target) {
+  if (state.selected.length === 0) {
+    setError("Select cards from the deck first.");
+    return;
+  }
+  const list = getCardList(target);
+  const cap = targetCap(target);
+  if (list.length + state.selected.length > cap) {
+    setError(`${ROW_LABEL[targetRowKey(target)]} would exceed ${cap} cards.`);
+    return;
+  }
+  for (const id of state.selected) list.push(id);
+  state.selected = [];
+  setError(null);
+  renderAll();
+}
+
+// ---------------------------------------------------------------------------
+// Misc render
+// ---------------------------------------------------------------------------
+function renderSelected() {
+  const sel = document.getElementById("selected_str");
+  if (state.selected.length === 0) {
+    sel.textContent = "none";
+  } else {
+    sel.textContent = state.selected.map((id, i) =>
+      `${i + 1}. ${cardStr(id)}`).join("  ");
+  }
+  document.getElementById("selected_count").textContent =
+    `${state.selected.length} card${state.selected.length === 1 ? "" : "s"}`;
+}
+
+function renderAll() {
+  renderDeck();
+  renderBoard();
+  renderPlaceButtons();
+  renderSelected();
+}
+
+function updateStreetVisibility() {
+  // Fantasy is always a single decision on street 1: hide the street
+  // selector to avoid confusing combos like "F15 + street 4".
+  const wrap = document.getElementById("street_wrap");
+  const sel = document.getElementById("street");
+  if (state.fantasy_tier !== 0) {
+    state.street = 1;
+    sel.value = "1";
+    wrap.style.display = "none";
+  } else {
+    wrap.style.display = "";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Wiring
+// ---------------------------------------------------------------------------
+document.getElementById("street").addEventListener("change", e => {
+  state.street = parseInt(e.target.value, 10);
+});
+document.getElementById("fantasy_tier").addEventListener("change", e => {
+  state.fantasy_tier = parseInt(e.target.value, 10);
+  updateStreetVisibility();
+});
+document.getElementById("future_hands").addEventListener("change", e => {
+  let v = parseInt(e.target.value, 10);
+  if (!Number.isFinite(v)) v = 0;
+  if (v < -1) v = -1;
+  state.future_hands = v;
+  // Normalize the visible value so users see what was actually accepted.
+  e.target.value = String(v);
+});
+document.getElementById("n_players").addEventListener("change", e => {
+  state.n_players = parseInt(e.target.value, 10);
+  // Clear any cards held in opponent slots that no longer exist.
+  for (let oi = state.n_players - 1; oi < state.opps.length; oi++) {
+    state.opps[oi] = { top: [], middle: [], bottom: [], discards: [] };
+  }
+  renderAll();
+});
+for (const btn of document.querySelectorAll(".place-btns button[data-target]")) {
+  btn.addEventListener("click", () => placeSelected(btn.dataset.target));
+}
+document.getElementById("clear_sel_btn").addEventListener("click", () => {
+  state.selected = [];
+  renderAll();
+});
+document.getElementById("reset_btn").addEventListener("click", () => {
+  state.selected = [];
+  state.street = 1;
+  state.fantasy_tier = 0;
+  state.future_hands = 5;
+  state.n_players = 2;
+  state.you = { top: [], middle: [], bottom: [], discards: [], pending: [] };
+  state.opps = [
+    { top: [], middle: [], bottom: [], discards: [] },
+    { top: [], middle: [], bottom: [], discards: [] },
+  ];
+  document.getElementById("street").value = "1";
+  document.getElementById("fantasy_tier").value = "0";
+  document.getElementById("future_hands").value = "5";
+  document.getElementById("n_players").value = "2";
+  setError(null);
+  renderAll();
+  updateStreetVisibility();
+  document.getElementById("results").innerHTML =
+    `<div class="small">Configure a position and press Analyze.</div>`;
+});
+
+// ---------------------------------------------------------------------------
+// Analyze
+// ---------------------------------------------------------------------------
+function setError(msg) {
+  // Errors render inside the results panel.
+  if (!msg) return;
+  const r = document.getElementById("results");
+  r.innerHTML = `<div class="err">${escapeHtml(msg)}</div>` + r.innerHTML;
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => (
+    {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]
+  ));
+}
+
+function buildSpec() {
+  // Each opponent panel is auto-synthesized server-side iff it's fully empty.
+  // We let the server decide per-slot via the `auto_fill_opponent` flag at
+  // spec-level (server checks each player slot independently).
+  const players = [
+    {
+      fantasy_tier: state.fantasy_tier,
+      board: {
+        top: state.you.top.map(cardStr),
+        middle: state.you.middle.map(cardStr),
+        bottom: state.you.bottom.map(cardStr),
+        discards: state.you.discards.map(cardStr),
+      },
+      pending: state.you.pending.map(cardStr),
+    },
+  ];
+  for (let oi = 0; oi < nOpps(); oi++) {
+    const opp = state.opps[oi];
+    players.push({
+      fantasy_tier: 0,
+      board: {
+        top: opp.top.map(cardStr),
+        middle: opp.middle.map(cardStr),
+        bottom: opp.bottom.map(cardStr),
+        discards: opp.discards.map(cardStr),
+      },
+      pending: [],
+    });
+  }
+  return {
+    street: state.street,
+    to_act: 0,
+    auto_fill_opponent: true,    // server checks per-slot emptiness
+    players,
+  };
+}
+
+async function analyze() {
+  const btn = document.getElementById("analyze_btn");
+  btn.disabled = true;
+  btn.textContent = "Analyzing...";
+  document.getElementById("results").innerHTML =
+    `<div class="small">Running rollouts…</div>`;
+  try {
+    const body = {
+      spec: buildSpec(),
+      n_rollouts: parseInt(document.getElementById("n_rollouts").value, 10),
+      top_k: parseInt(document.getElementById("top_k").value, 10),
+      future_hands: state.future_hands,
+    };
+    const resp = await fetch(API_BASE + "/api/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      document.getElementById("results").innerHTML =
+        `<div class="err">${escapeHtml(data.error || ("HTTP " + resp.status))}</div>`;
+      return;
+    }
+    renderResults(data);
+  } catch (e) {
+    document.getElementById("results").innerHTML =
+      `<div class="err">${escapeHtml(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Analyze";
+  }
+}
+document.getElementById("analyze_btn").addEventListener("click", analyze);
+
+function renderResults(data) {
+  const root = document.getElementById("results");
+  const synth = data.opp_was_synthesized
+    ? `<div class="info-box">Opponent state was synthesized via heuristic
+       self-play (no opponent data supplied).</div>`
+    : "";
+  const npBanner = (data.n_players && data.n_players > 2)
+    ? `<div class="info-box">${data.n_players}-player mode: loaded EV
+       tables were trained at 2 players, so absolute EV magnitudes are
+       approximate; relative ranking among candidates is reliable.</div>`
+    : "";
+  const horizonInfo = data.future_hands === -1
+    ? ` · horizon=<b>&infin;</b> (converged EV)`
+    : data.future_hands > 0
+      ? ` · horizon=<b>${data.future_hands}</b> future hand${data.future_hands === 1 ? "" : "s"}`
+      : ` · horizon=<b>this hand only</b>`;
+  const meta = `
+    ${synth}
+    ${npBanner}
+    <div class="meta">
+      Street ${data.street} · tier ${tierName(data.fantasy_tier)}
+      · ${data.n_legal_actions} legal · ${data.n_evaluated} evaluated
+      · ${data.n_rollouts_per_action} rollouts/cand${horizonInfo}
+      · <b>${data.elapsed_s.toFixed(2)} s</b>
+    </div>
+    <div class="meta">
+      Lookups served by tables:
+      TT=<b>${data.lookups.transposition_hits}</b>
+      open=<b>${data.lookups.opening_hits}</b>
+      fan=<b>${data.lookups.fantasy_hits}</b>
+      prior=<b>${data.lookups.prior_hits}</b>
+      fallback=<b>${data.lookups.fallback_calls}</b>
+    </div>
+    ${data.state_table_foul_prob !== null
+      ? `<div class="meta">State foul-prob (table): <b>${(data.state_table_foul_prob * 100).toFixed(1)}%</b>
+            · prior visits: <b>${data.state_table_prior_visits}</b></div>`
+      : ""}
+  `;
+  const cards = data.candidates.map((c, i) => candidateHtml(c, i, data)).join("");
+  root.innerHTML = meta + cards;
+  // Wire up Apply buttons.
+  for (const btn of root.querySelectorAll(".apply-btn")) {
+    btn.addEventListener("click", () => {
+      const idx = parseInt(btn.dataset.idx, 10);
+      applyRecommendation(data.candidates[idx]);
+    });
+  }
+}
+
+function tierName(t) {
+  return t === 0 ? "NORMAL" : "F" + t;
+}
+function evClass(x) {
+  if (x > 0.5) return "pos";
+  if (x < -0.5) return "neg";
+  return "zero";
+}
+
+// Render the per-tier fantasy probability breakdown for one candidate.
+// Lists every tier with > 0 rollout hits (other than NORMAL), in
+// ascending tier order (F14 < F15 < F16 < F17), as percentages with one
+// decimal place. Hidden when no fantasy entries were observed.
+function tierBreakdownHtml(c) {
+  const counts = c.dest_tier_counts || {};
+  const total = c.n_rollouts || 0;
+  if (total <= 0) return "";
+  const tiers = [14, 15, 16, 17];
+  const parts = [];
+  for (const t of tiers) {
+    const n = counts[t] || 0;
+    if (n > 0) {
+      const pct = (n / total) * 100;
+      parts.push(`F${t}: <b>${pct.toFixed(1)}%</b>`);
+    }
+  }
+  if (parts.length === 0) return "";
+  return `<div class="tier-breakdown small" style="margin-top: 4px;
+              color: var(--muted)">
+            <span style="color: var(--text)">Tier breakdown:</span>
+            ${parts.join(" &nbsp;·&nbsp; ")}
+          </div>`;
+}
+
+function candidateHtml(c, idx, data) {
+  const placements = c.placements.map(p => `
+    <span class="card ${p.card < 52 ? 'suit-' + cardSuit(p.card) : 'joker'}"
+          style="width: 22px; height: 28px; font-size: 10px;">
+      ${cardLabel(p.card)}
+    </span><b style="color: var(--text)">→${p.slot_str}</b>
+  `).join(" ");
+  const tblFoul = c.table_foul_prob !== null
+    ? (c.table_foul_prob * 100).toFixed(1) + "%" : "—";
+  const tblPrior = c.table_prior_mean_ev !== null
+    ? c.table_prior_mean_ev.toFixed(2) + " (n=" + c.table_prior_visits + ")" : "—";
+  const showHorizon = data.future_hands > 0;
+  const ev = showHorizon ? c.combined_ev : c.ev_mean;
+  const horizonStat = showHorizon
+    ? `<div>Horizon EV: <b>${c.horizon_ev >= 0 ? "+" : ""}${c.horizon_ev.toFixed(2)}</b></div>
+       <div>This-hand EV: <b>${c.ev_mean >= 0 ? "+" : ""}${c.ev_mean.toFixed(2)}</b></div>`
+    : "";
+  return `
+    <div class="candidate ${c.is_recommended ? 'recommended' : ''}">
+      <div class="head">
+        <span class="placements">${placements}</span>
+        <span class="ev ${evClass(ev)}">
+          ${ev >= 0 ? "+" : ""}${ev.toFixed(2)}
+          <span class="small" style="font-weight: 400">±${c.ev_stderr.toFixed(2)}</span>
+          ${c.is_recommended ? '<span class="badge">PICK</span>' : ''}
+        </span>
+      </div>
+      <div class="stats">
+        <div>Heuristic: <b>${c.heuristic_score.toFixed(2)}</b></div>
+        <div>Foul: <b>${(c.foul_rate * 100).toFixed(1)}%</b></div>
+        <div>→ Fantasy: <b>${(c.fantasy_entry_rate * 100).toFixed(1)}%</b></div>
+        <div>Rollouts: <b>${c.n_rollouts}</b></div>
+        ${horizonStat}
+        <div>Table foul: <b>${tblFoul}</b></div>
+        <div>Table EV: <b>${tblPrior}</b></div>
+      </div>
+      ${tierBreakdownHtml(c)}
+      <div style="margin-top: 8px; text-align: right">
+        <button class="apply-btn" data-idx="${idx}"
+                style="background: var(--accent); color: #08111a; border: none;
+                       padding: 4px 12px; border-radius: 3px; font-size: 11px;
+                       font-weight: 600; cursor: pointer;">
+          Apply this play
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+// ---------------------------------------------------------------------------
+// Apply a recommendation: move each pending card to its target row.
+// ---------------------------------------------------------------------------
+const SLOT_TO_KEY = { T: "top", M: "middle", B: "bottom", X: "discards" };
+
+function applyRecommendation(cand) {
+  // Verify the user's pending matches the candidate's cards.
+  const candCards = cand.placements.map(p => p.card);
+  const pending = state.you.pending;
+  const candSet = new Set(candCards);
+  const pendSet = new Set(pending);
+  if (candSet.size !== pendSet.size ||
+      [...candSet].some(c => !pendSet.has(c))) {
+    setError("Cannot apply: your hand has changed since the analysis.");
+    return;
+  }
+  // Capacity pre-check.
+  const adds = { top: 0, middle: 0, bottom: 0, discards: 0 };
+  for (const p of cand.placements) {
+    const key = SLOT_TO_KEY[p.slot_str];
+    if (!key) {
+      setError("Unknown slot: " + p.slot_str);
+      return;
+    }
+    adds[key]++;
+  }
+  for (const k of ["top", "middle", "bottom"]) {
+    if (state.you[k].length + adds[k] > ROW_CAP[k]) {
+      setError(`Apply would overflow ${k} (${state.you[k].length}+${adds[k]}>${ROW_CAP[k]}).`);
+      return;
+    }
+  }
+  // Clear pending and place each card in the recommended slot, preserving
+  // candidate order.
+  state.you.pending = [];
+  for (const p of cand.placements) {
+    const key = SLOT_TO_KEY[p.slot_str];
+    state.you[key].push(p.card);
+  }
+  // Auto-advance to the next street so the user can deal new cards.
+  if (state.street < 5 && state.fantasy_tier === 0) {
+    state.street += 1;
+    document.getElementById("street").value = String(state.street);
+  }
+  setError(null);
+  renderAll();
+  // Clear the results panel — the position has changed.
+  document.getElementById("results").innerHTML =
+    `<div class="small">Applied. Deal new pending cards and press Analyze again.</div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------------------
+fetch(API_BASE + "/api/health").then(r => r.json()).then(d => {
+  const status = document.getElementById("status");
+  if (d.run_dir) {
+    status.textContent = `· ${d.tables_loaded.length} tables loaded from ${d.run_dir} · API ${API_BASE || "(same-origin)"}`;
+  } else {
+    status.textContent = `· no run loaded (heuristic only) · API ${API_BASE || "(same-origin)"}`;
+  }
+}).catch(() => {
+  document.getElementById("status").textContent =
+    `· API unreachable at ${API_BASE || "(same-origin)"}`;
+});
+
+renderAll();
+updateStreetVisibility();
+</script>
+</body>
+</html>

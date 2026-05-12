@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ofc_solver"
+version = "0.0.1"
+description = "Open-Face Chinese Poker (Pineapple + Fantasyland) AI framework"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-xdist", "numpy"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["engine*", "state*", "ai*", "simulation*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
