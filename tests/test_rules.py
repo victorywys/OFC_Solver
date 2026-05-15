@@ -144,7 +144,7 @@ def test_split_lines():
 
 # ---------- joker-aware foul resolution ----------
 from engine.cards import JOKER_1, JOKER_2, parse_card  # noqa: E402
-from engine.evaluator import PAIR, QUADS, TRIPS  # noqa: E402
+from engine.evaluator import PAIR, QUADS, STRAIGHT_FLUSH, TRIPS  # noqa: E402
 from engine.rules import resolve_board  # noqa: E402
 
 
@@ -203,6 +203,54 @@ def test_joker_resolver_no_jokers_unchanged():
     t, m, b, fouled = resolve_board(top, mid, bot)
     assert not fouled
     assert (t, m, b) == (evaluate_3(top), evaluate_5(mid), evaluate_5(bot))
+
+
+def test_joker_on_bottom_can_use_card_placed_on_other_row():
+    """Regression test: joker is a true wildcard.
+
+    Setup: bottom is 2♠-3♠-4♠-5♠-Joker. The joker must declare itself as
+    6♠ (or A♠) to make a straight flush. The 6♠ is placed on TOP and A♠
+    is also visible (on top). Under the buggy rule the joker pool would
+    exclude these cards, leaving only mixed-suit completions which yield
+    a plain straight (cat=STRAIGHT) and force a foul against the heart
+    flush on middle. Under the correct rule the joker may declare 6♠ or
+    A♠ regardless of where they are placed, giving a straight flush on
+    bottom and a clean board.
+    """
+    top = (parse_card("6s"), parse_card("Ah"), parse_card("As"))
+    mid = (parse_card("2h"), parse_card("5h"), parse_card("7h"),
+           parse_card("9h"), parse_card("Qh"))   # heart flush, Q-high (non-SF)
+    bot = (parse_card("2s"), parse_card("3s"), parse_card("4s"),
+           parse_card("5s"), JOKER_1)
+    t, m, b, fouled = resolve_board(top, mid, bot)
+    assert not fouled
+    assert b[0] == STRAIGHT_FLUSH
+    assert is_valid(top, mid, bot)
+
+
+def test_joker_pool_includes_cards_placed_on_other_rows():
+    """A joker's substitution pool should include cards visible on
+    other rows of the same board.
+
+    Setup: top has (A♥, A♠, J1). The other two aces (A♦, A♣) are placed
+    on middle and bottom respectively. Under the BUGGY rule the joker
+    pool excludes all four aces (Ah,As own-row plus Ad,Ac placed on
+    other rows), so top maxes out at PAIR of aces. Under the correct
+    rule the joker may declare itself as A♦ or A♣ (cards placed on
+    OTHER rows are perfectly legal substitutions), lifting the top to
+    TRIPS of aces.
+    """
+    top = (parse_card("Ah"), parse_card("As"), JOKER_1)
+    mid = (parse_card("Ad"), parse_card("2d"), parse_card("5d"),
+           parse_card("7d"), parse_card("9d"))     # diamond flush A-high
+    bot = (parse_card("Ac"), parse_card("2c"), parse_card("3c"),
+           parse_card("4c"), parse_card("5c"))     # wheel SF in clubs
+    t, m, b, fouled = resolve_board(top, mid, bot)
+    assert not fouled
+    # The critical assertion: top is TRIPS of aces, not PAIR.
+    # Only the correct (full-52) joker pool can deliver this.
+    assert t[0] == TRIPS
+    assert t[1][0] == 12   # aces (rank 12)
 
 
 def test_joker_score_match_uses_resolved_assignment():

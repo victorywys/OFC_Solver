@@ -7,7 +7,10 @@ comparisons are simple Python tuple compares.
 When the board contains jokers (wildcards), evaluating each row in
 isolation is wrong: each row's evaluator will pick the substitution that
 maximizes that row alone, even if the resulting layout fouls. Real OFC
-rules let the player choose joker substitutions at scoring time, so
+rules let the player choose joker substitutions at scoring time, and a
+joker may represent ANY of the 52 standard cards — including cards
+already placed on other rows of this same board, or (when both jokers
+are in play in different rows) the same card as the other joker.
 `resolve_board` enumerates joint joker assignments and returns the
 non-fouling assignment that maximizes total royalties (falling back to
 the lex-max ranks when no non-fouling assignment exists).
@@ -54,12 +57,21 @@ def resolve_board(
 
     Resolution rules (mirror real-game player choice at scoring time):
 
-      1. Enumerate joint joker substitutions. Each joker independently
-         maps to a standard card not already on the board, and the two
-         jokers (when both present) must map to distinct cards.
-      2. Among non-fouling assignments, pick the one with maximum total
+      1. Each joker is a true wildcard: it independently substitutes for
+         ANY of the 52 standard cards, including a card already placed
+         on another row of this same board. (Physically the joker is a
+         distinct game piece; the rank/suit it represents is declared at
+         scoring time and need not be a card visible elsewhere.)
+      2. When both jokers are present and on different rows they may
+         each represent the same standard card (e.g. both declared as
+         6♠) because the two jokers are physically distinct.
+      3. Within a single row the resulting 5 (or 3) cards must be
+         distinct for the per-row evaluator; any duplicate substitution
+         is dominated by a same-rank, distinct-suit alternative, so we
+         skip duplicates within a row without loss of generality.
+      4. Among non-fouling assignments, pick the one with maximum total
          royalties. Tie-break by the lex max of (top, middle, bottom).
-      3. If no non-fouling assignment exists, the board is fouled; we
+      5. If no non-fouling assignment exists, the board is fouled; we
          return the lex-max per-row ranks for diagnostic display.
 
     Caches on the (top, middle, bottom) tuple so repeated boards are O(1).
@@ -88,34 +100,40 @@ def resolve_board(
             joker_positions.append((2, i))
     n_jokers = len(joker_positions)
 
-    # Build pool of standard cards not already placed on the board.
-    used: set[int] = set()
-    for c in top:
-        if not is_joker(c):
-            used.add(c)
-    for c in middle:
-        if not is_joker(c):
-            used.add(c)
-    for c in bottom:
-        if not is_joker(c):
-            used.add(c)
-    pool = [c for c in range(NUM_STD_CARDS) if c not in used]
+    # Per-row substitution pool. A joker may represent any of the 52
+    # standard cards EXCEPT the non-joker cards already in its own row
+    # (within-row duplicates are dominated by same-rank distinct-suit
+    # alternatives — see docstring rule 3). Cross-row duplication is
+    # explicitly allowed (rules 1 and 2).
+    row_cards = (top, middle, bottom)
+    row_pools: list[list[int]] = []
+    for row in row_cards:
+        used_in_row = {c for c in row if not is_joker(c)}
+        row_pools.append(
+            [c for c in range(NUM_STD_CARDS) if c not in used_in_row]
+        )
 
     # Enumerate joker assignments.
     if n_jokers == 1:
-        substs: list[tuple[int, ...]] = [(c,) for c in pool]
+        r0 = joker_positions[0][0]
+        substs: list[tuple[int, ...]] = [(c,) for c in row_pools[r0]]
     else:  # n_jokers == 2
-        if joker_positions[0][0] == joker_positions[1][0]:
-            # Both jokers in same row — evaluator is order-agnostic, so
-            # combinations suffice (each unordered pair tested once).
+        r0, r1 = joker_positions[0][0], joker_positions[1][0]
+        if r0 == r1:
+            # Both jokers in same row — evaluator is order-agnostic;
+            # 5-card row must have 5 distinct cards (rule 3), so use
+            # unordered combinations of distinct picks from this row's pool.
+            pool_r = row_pools[r0]
             substs = []
-            for i in range(len(pool)):
-                ai = pool[i]
-                for j in range(i + 1, len(pool)):
-                    substs.append((ai, pool[j]))
+            for i in range(len(pool_r)):
+                ai = pool_r[i]
+                for j in range(i + 1, len(pool_r)):
+                    substs.append((ai, pool_r[j]))
         else:
-            # Different rows — order matters; test all ordered distinct pairs.
-            substs = [(a, b) for a in pool for b in pool if a != b]
+            # Different rows — each joker is independently declared and
+            # MAY represent the same standard card as the other joker
+            # (rule 2). Cartesian product over the two rows' pools.
+            substs = [(a, b) for a in row_pools[r0] for b in row_pools[r1]]
 
     best_valid: tuple[HandRank, HandRank, HandRank] | None = None
     best_valid_royalty = -(1 << 30)
