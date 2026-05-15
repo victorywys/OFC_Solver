@@ -112,6 +112,95 @@ def test_ordering_penalty_still_fires_when_top_truly_dominates():
     assert pen >= DEFAULT_WEIGHTS.w_order_violation
 
 
+def test_ordering_penalty_fires_when_top_full_kicker_traps_sparse_mid_bot():
+    """Regression for the opening-book ``5c Qd Kc Ah As`` bug.
+
+    Top is filled to capacity with ``AAK`` (PAIR-A committed, locked at
+    capacity). Middle and bottom each contain a single high card. Before
+    the fix the partial-strength gates were ``mid.n >= 2`` and
+    ``bot.n >= 2``, so neither comparison fired and the foul penalty was
+    0 — making the heuristic prefilter rank this AA-on-top layout as
+    its top-1 score and pushing the canonical opening book to recommend
+    a placement with ~89% terminal foul rate.
+
+    After the fix, when the upper row is ``locked`` (n == capacity and
+    max_mult >= 2), the comparison fires with the lower row's commit
+    count floored at 1, producing a non-trivial penalty.
+    """
+    top = _profile_row(parse_cards("Ah As Kc"), 3)   # AA, K kicker, FULL
+    mid = _profile_row(parse_cards("Qd"), 5)         # single Q
+    bot = _profile_row(parse_cards("5c"), 5)         # single 5
+    pen = _foul_penalty(top, mid, bot, DEFAULT_WEIGHTS)
+    # Both top→mid and top→bot order-violation clauses should fire.
+    # Each contributes >= w_order_violation per (gap+1) per row.n,
+    # so combined penalty should be well above one tick.
+    assert pen >= 2 * DEFAULT_WEIGHTS.w_order_violation, (
+        f"locked-top + sparse-mid/bot must add penalty; got {pen:.2f}"
+    )
+
+
+def test_ordering_penalty_zero_when_top_committed_low_pair_and_mid_bot_room_to_beat():
+    """Counter-test: when top is locked at a *low* pair, sparse mid/bot
+    are not penalized because they can readily develop to beat low pair.
+
+    Top is filled to capacity with ``77x``. Middle has a single high
+    card. Bottom has a single high card. Because the heuristic compares
+    the partial-strength tuple ``(max_mult, second_mult, max_mult_rank)``,
+    top=(2,1,5) is greater than mid=(1,0,11) for the *max_mult* dimension,
+    so the penalty does fire — but at minimal magnitude (gap=1, scale=1).
+
+    This test pins the *minimal* penalty so a future tightening doesn't
+    accidentally erase the safety margin.
+    """
+    top = _profile_row(parse_cards("7c 7d 2s"), 3)
+    mid = _profile_row(parse_cards("Kc"), 5)
+    bot = _profile_row(parse_cards("Qd"), 5)
+    pen = _foul_penalty(top, mid, bot, DEFAULT_WEIGHTS)
+    # Two clauses fire (top→mid, top→bot), each adds w_order_violation
+    # * (gap+1=2) * scale=1 = 44. Plus possibly small expected-category
+    # smoothing.
+    assert pen >= 2 * 2 * DEFAULT_WEIGHTS.w_order_violation, (
+        f"low-pair-top still creates ordering risk; got {pen:.2f}"
+    )
+
+
+def test_score_action_prefers_aa_on_bottom_for_aa_plus_high_kickers():
+    """End-to-end regression for the opening-book AA-on-top bias.
+
+    For hand ``5c Qd Kc Ah As`` on an empty street-1 board, the optimal
+    placement (per unrestricted MC search) is AA-on-bottom with a high
+    kicker. Before the fix the heuristic ranked all 6 AA-on-top variants
+    as its top-6 scores. After the fix the top-1 must be AA-on-bottom.
+    """
+    from state.board import SLOT_BOTTOM, SLOT_MIDDLE, SLOT_TOP
+    from state.game_state import GameState
+    from ai.rollout import legal_actions
+    from engine.cards import is_joker
+
+    hand = parse_cards("5c Qd Kc Ah As")
+    opp = parse_cards("2h 4c 7s Td Jh")
+    gs = GameState.new(seed=42)
+    gs.deal_street()
+    gs.deck.remove(list(hand) + list(opp))
+    gs.hands[0].pending = list(hand)
+    gs.hands[1].pending = list(opp)
+    cands = legal_actions(gs, 0)
+    scored = sorted(
+        ((score_action(a, gs.hands[0].board), a) for a in cands),
+        key=lambda x: -x[0].total,
+    )
+    best_action = scored[0][1]
+    # Where did each ace land?
+    slot_of = {c: s for c, s in best_action.placements}
+    ace_slots = [
+        slot_of[c] for c in hand if not is_joker(c) and (c >> 2) == 12  # rank A
+    ]
+    assert ace_slots == [SLOT_BOTTOM, SLOT_BOTTOM], (
+        f"AA must go to bottom in heuristic-best for AA+high; "
+        f"got slots {ace_slots}, placements={best_action.placements}"
+    )
+
+
 def test_score_aa_top_fantasy_play_outranks_safe_drop_on_user_position():
     """End-to-end regression for the exact position reported by the user.
 

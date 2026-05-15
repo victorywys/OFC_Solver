@@ -526,20 +526,37 @@ def _ordering_penalty_compute(
         pen += w.w_foul
 
     # likely fouls / ordering risk via partial-strength tuple (catches
-    # rank-level dominance when max_mult is the same)
+    # rank-level dominance when max_mult is the same).
+    #
+    # Gate: penalty fires when the *lower* row has committed >= 2 cards
+    # (so the comparison is meaningful), OR when the *upper* row is
+    # filled to capacity with committed pair-or-better — in which case
+    # the upper row is permanently locked at a category the lower row
+    # must still beat with very limited remaining material. This second
+    # branch catches the "T=AAK | M=q | B=k" pattern where the prior
+    # bug allowed 0 foul penalty because `mid.n < 2` and `bot.n < 2`,
+    # and is what made the canonical opening book recommend AA-on-top
+    # with 89% foul rate on hands like `5c Qd Kc Ah As`.
     s_top = _partial_strength_tuple(top)
     s_mid = _partial_strength_tuple(mid)
     s_bot = _partial_strength_tuple(bot)
+    top_locked = top.n == top.capacity and top.max_mult >= 2
+    mid_locked = mid.n == mid.capacity and mid.max_mult >= 2
 
-    if mid.n >= 2 and top.max_mult >= 2 and s_top > s_mid:
+    if (mid.n >= 2 or top_locked) and top.max_mult >= 2 and s_top > s_mid:
         gap = top.max_mult - max(mid.max_mult, 1)
-        pen += w.w_order_violation * (gap + 1) * mid.n
-    if bot.n >= 2 and mid.max_mult >= 2 and s_mid > s_bot:
+        # When mid is empty/sparse and top is locked, use mid.n=1 as
+        # a floor so the penalty is non-zero (but still proportionate).
+        scale = max(mid.n, 1) if top_locked else mid.n
+        pen += w.w_order_violation * (gap + 1) * scale
+    if (bot.n >= 2 or mid_locked) and mid.max_mult >= 2 and s_mid > s_bot:
         gap = mid.max_mult - max(bot.max_mult, 1)
-        pen += w.w_order_violation * (gap + 1) * bot.n
-    if bot.n >= 2 and top.max_mult >= 2 and s_top > s_bot:
+        scale = max(bot.n, 1) if mid_locked else bot.n
+        pen += w.w_order_violation * (gap + 1) * scale
+    if (bot.n >= 2 or top_locked) and top.max_mult >= 2 and s_top > s_bot:
         gap = top.max_mult - max(bot.max_mult, 1)
-        pen += w.w_order_violation * (gap + 1) * bot.n
+        scale = max(bot.n, 1) if top_locked else bot.n
+        pen += w.w_order_violation * (gap + 1) * scale
 
     # expected-category ordering risk: catches "middle on track for straight
     # while bottom committed to a pair" patterns that the partial-strength
